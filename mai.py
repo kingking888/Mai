@@ -46,14 +46,19 @@ async def worker(id, queue, session):
     while True:
         request = await queue.get()
         logging.info(f'worker#{id} 将 {request} 从队列取出')
+        # 等待响应
         resp = await fetch(request.url, session)
-        result = spider.parse(Response(request, resp))
+        resp = Response(request, resp)
+        # 使用回调函数处理响应
+        parse = getattr(request, 'callback')
+        result = parse(resp) if parse else spider.parse(resp)
+        # 回调函数返回新的URL或提取的数据
         for r in result:
-            if isinstance(r, Request):
+            if isinstance(r, Request): # 新的URL
                 logging.info(f'worker#{id} 将 {r} 加入队列')
                 await scheduler(r, queue)
-            else:
-                pass
+            else: # 提取的数据
+                logging.info(f'Item:{r}')
         logging.info(f'worker#{id} 处理 {request} 完成')
         queue.task_done()
 

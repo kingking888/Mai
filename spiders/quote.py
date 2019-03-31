@@ -14,9 +14,8 @@ class Spider:
         for quote in response.extract('//div[@class="quote"]/span[@class="text"]/text()'):
             item = Item()    
             item['quote'] = quote
-            logger.info(f'item: {item}')
             yield item
 
         next_page = response.extract_first('//li[@class="next"]/a/@href')
         if next_page:
-            yield response.follow(next_page)
+            yield response.follow(next_page, callback=self.parse)
