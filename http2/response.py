@@ -4,8 +4,7 @@ from .selector import Selector
 from .request import Request
 
 class Response:
-    def __init__(url, request, status, text):
-        self.url = url
+    def __init__(self, request, text, status=200):
         self.request = request
         self.status = status
         self.text = text
@@ -17,9 +16,10 @@ class Response:
     def extract_first(self, xpath):
         return self.selector.extract_first(xpath)
 
-    def urljoin(self, url)
-        return urljoin(self.url, url)
+    def urljoin(self, url):
+        return urljoin(self.request.url, url)
 
-    def follow(headers={}, *args, **kwargs):
-        headers['Referer'] = self.url
-        return Request(headers=headers, *args, **kwargs)
+    def follow(self, url, headers={}, *args, **kwargs):
+        # headers['Referer'] = self.request.url
+        url = self.urljoin(url)
+        return Request(url, headers=headers, *args, **kwargs)
