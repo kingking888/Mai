@@ -11,7 +11,7 @@ from http2.response import Response
 spiderName = sys.argv[1]
 mod = importlib.import_module(f'spiders.{spiderName}')
 spider = mod.Spider()
-
+done = set()
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -45,6 +45,11 @@ async def worker(id, queue, session):
     '''
     while True:
         request = await queue.get()
+        if request.fingerprint in done:
+            logging.info(f'worker#{id} 过滤：{request.url} 已经采集过')
+            queue.task_done() # 从队列获取元素并处理完之后，一定要调用 .task_done() 否则会造成阻塞
+            continue
+        done.add(request.fingerprint)
         logging.info(f'worker#{id} 将 {request} 从队列取出')
         # 等待响应
         resp = await fetch(request.url, session)
