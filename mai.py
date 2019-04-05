@@ -3,10 +3,12 @@ import importlib
 import sys
 import logging
 import time
+from datetime import datetime
 
 import aiohttp
 from http2.request import Request
 from http2.response import Response
+from core.stats import Counter
 
 spiderName = sys.argv[1]
 mod = importlib.import_module(f'spiders.{spiderName}')
@@ -23,18 +25,18 @@ headers = {
 }
 
 
-async def fetch(url, session):
-    logging.debug(f'下载 {url}')
-    async with session.get(url, headers=headers) as resp:
+async def fetch(request, session):
+    logging.debug(f'下载 {request.url}')
+    async with session.get(request.url, headers=headers) as resp:
         resp.raise_for_status()
-        return await resp.text()
-
+        text = await resp.text()
+        return Response(request, text, resp.status)
 
 async def scheduler(request, queue):
         await queue.put(request)
         logging.debug(f'{request} 已被加入队列，当前队列有 {queue.qsize()} 个URL')
 
-async def worker(id, queue, session):
+async def worker(id, queue, session, counter):
     '''
         工作方式：
             * 从队列中取出 URL
@@ -52,22 +54,33 @@ async def worker(id, queue, session):
         done.add(request.fingerprint)
         logging.info(f'worker#{id} 将 {request} 从队列取出')
         # 等待响应
-        resp = await fetch(request.url, session)
-        resp = Response(request, resp)
-        # 使用回调函数处理响应
-        parse = getattr(request, 'callback')
-        result = parse(resp) if parse else spider.parse(resp)
-        # 回调函数返回新的URL或提取的数据
-        for r in result:
-            if isinstance(r, Request): # 新的URL
-                logging.info(f'worker#{id} 将 {r} 加入队列')
-                await scheduler(r, queue)
-            else: # 提取的数据
-                logging.info(f'Item:{r}')
-        logging.info(f'worker#{id} 处理 {request} 完成')
+        try: 
+            resp = await fetch(request, session)
+        except:
+            counter.inc('badResponse', 1)
+            logging.exception(f'{request.url} 下载失败')
+        else:
+            counter.inc('response', 1)
+            # 使用回调函数处理响应
+            parse = getattr(request, 'callback')
+            result = parse(resp) if parse else spider.parse(resp)
+            # 回调函数返回新的URL或提取的数据
+            for r in result:
+                if isinstance(r, Request): # 新的URL
+                    logging.info(f'worker#{id} 将 {r} 加入队列')
+                    await scheduler(r, queue)
+                else: # 提取的数据
+                    logging.info(f'Item:{r}')
+                    counter.inc('items', 1)
+            logging.info(f'worker#{id} 处理 {request} 完成')
         queue.task_done()
 
 async def main():
+    counter = Counter()
+    timefmt = '%Y-%m-%d %X'
+    startTime = datetime.now()
+    c = Counter()
+
     # 将URL种子放入队列
     queue = asyncio.Queue()
     initSeed = [scheduler(Request(url), queue) for url in spider.urls]
@@ -79,13 +92,21 @@ async def main():
     logging.info(f'启动 {workerNum} 个worker')
     async with aiohttp.ClientSession() as session:
         for id in range(workerNum):
-            asyncio.create_task(worker(id, queue, session))    
+            asyncio.create_task(worker(id, queue, session, counter))    
         await queue.join()    
 
-
+    endtTime = datetime.now()
+    stats = {
+        'startTime': startTime.strftime(timefmt),
+        'endtTime': endtTime.strftime(timefmt),
+        'totalTime': str(endtTime - startTime),
+    }
+    stats.update(counter.get_counter())
+    logging.info('\n' + '\n'.join([f'{k}: {v}' for k, v in stats.items()]))
 
 
 if __name__ == "__main__":
-    start = time.perf_counter()
+
+
+    
     asyncio.run(main())
-    print(f'\n {time.perf_counter()-start}s')
