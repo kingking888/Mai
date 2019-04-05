@@ -10,6 +10,7 @@ import aiohttp
 from http2.request import Request
 from http2.response import Response
 from core.stats import Counter
+from core.mail import sendmail
 
 spiderName = sys.argv[1]
 batchId = sys.argv[2]
@@ -26,7 +27,8 @@ fmt = logging.Formatter(
 # 将警告和错误日志写入文件
 os.makedirs('log', exist_ok=True)
 filename = f'{spiderName}-{batchId}.log.txt'
-fileHandler = logging.FileHandler(os.path.join('.', 'log', filename), encoding='utf-8')
+logPath = os.path.join('.', 'log', filename)
+fileHandler = logging.FileHandler(logPath, encoding='utf-8')
 fileHandler.setLevel(logging.DEBUG)
 fileHandler.setFormatter(fmt)
 # 将普通日志输出到终端
@@ -122,8 +124,8 @@ async def main():
         'totalTime': str(endtTime - startTime),
     }
     stats.update(counter.get_counter())
+    sendmail(spiderName, stats, logPath)
     log.info('\n' + '\n'.join([f'{k}: {v}' for k, v in stats.items()]))
-
 
 if __name__ == "__main__":
     asyncio.run(main())
