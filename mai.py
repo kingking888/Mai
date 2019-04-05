@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import sys
+import os
 import logging
 import time
 from datetime import datetime
@@ -11,11 +12,30 @@ from http2.response import Response
 from core.stats import Counter
 
 spiderName = sys.argv[1]
+batchId = sys.argv[2]
 mod = importlib.import_module(f'spiders.{spiderName}')
 spider = mod.Spider()
 done = set()
 
-logging.basicConfig(level=logging.DEBUG)
+log = logging.getLogger('Mai')
+log.setLevel(logging.DEBUG)
+fmt = logging.Formatter(
+    fmt='%(asctime)s %(name)s:%(levelname)s: %(message)s',
+    datefmt='%Y-%m-%d %X'
+)
+# 将警告和错误日志写入文件
+os.makedirs('log', exist_ok=True)
+filename = f'{spiderName}-{batchId}.log.txt'
+fileHandler = logging.FileHandler(os.path.join('.', 'log', filename), encoding='utf-8')
+fileHandler.setLevel(logging.DEBUG)
+fileHandler.setFormatter(fmt)
+# 将普通日志输出到终端
+consHandler = logging.StreamHandler()
+consHandler.setLevel(logging.DEBUG)
+consHandler.setFormatter(fmt)
+## 
+log.addHandler(fileHandler)
+log.addHandler(consHandler)
 
 headers = {
 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/73.0.3683.86 Safari/537.36',
@@ -26,7 +46,7 @@ headers = {
 
 
 async def fetch(request, session):
-    logging.debug(f'下载 {request.url}')
+    log.debug(f'下载 {request.url}')
     async with session.get(request.url, headers=headers) as resp:
         resp.raise_for_status()
         text = await resp.text()
@@ -34,7 +54,7 @@ async def fetch(request, session):
 
 async def scheduler(request, queue):
         await queue.put(request)
-        logging.debug(f'{request} 已被加入队列，当前队列有 {queue.qsize()} 个URL')
+        log.debug(f'{request} 已被加入队列，当前队列有 {queue.qsize()} 个URL')
 
 async def worker(id, queue, session, counter):
     '''
@@ -48,17 +68,17 @@ async def worker(id, queue, session, counter):
     while True:
         request = await queue.get()
         if request.fingerprint in done:
-            logging.info(f'worker#{id} 过滤：{request.url} 已经采集过')
+            log.info(f'worker#{id} 过滤：{request.url} 已经采集过')
             queue.task_done() # 从队列获取元素并处理完之后，一定要调用 .task_done() 否则会造成阻塞
             continue
         done.add(request.fingerprint)
-        logging.info(f'worker#{id} 将 {request} 从队列取出')
+        log.info(f'worker#{id} 将 {request} 从队列取出')
         # 等待响应
         try: 
             resp = await fetch(request, session)
         except:
             counter.inc('badResponse', 1)
-            logging.exception(f'{request.url} 下载失败')
+            log.exception(f'{request.url} 下载失败')
         else:
             counter.inc('response', 1)
             # 使用回调函数处理响应
@@ -67,12 +87,12 @@ async def worker(id, queue, session, counter):
             # 回调函数返回新的URL或提取的数据
             for r in result:
                 if isinstance(r, Request): # 新的URL
-                    logging.info(f'worker#{id} 将 {r} 加入队列')
+                    log.info(f'worker#{id} 将 {r} 加入队列')
                     await scheduler(r, queue)
                 else: # 提取的数据
-                    logging.info(f'Item:{r}')
+                    print(f'Item:{r}')
                     counter.inc('items', 1)
-            logging.info(f'worker#{id} 处理 {request} 完成')
+            log.info(f'worker#{id} 处理 {request} 完成')
         queue.task_done()
 
 async def main():
@@ -85,11 +105,11 @@ async def main():
     queue = asyncio.Queue()
     initSeed = [scheduler(Request(url), queue) for url in spider.urls]
     await asyncio.gather(*initSeed)
-    logging.info(f'qsize = {queue.qsize()}')
+    log.info(f'qsize = {queue.qsize()}')
 
     # 启动爬虫，默认个数是 5
     workerNum = getattr(spider, 'workerNum', 5)
-    logging.info(f'启动 {workerNum} 个worker')
+    log.info(f'启动 {workerNum} 个worker')
     async with aiohttp.ClientSession() as session:
         for id in range(workerNum):
             asyncio.create_task(worker(id, queue, session, counter))    
@@ -102,11 +122,8 @@ async def main():
         'totalTime': str(endtTime - startTime),
     }
     stats.update(counter.get_counter())
-    logging.info('\n' + '\n'.join([f'{k}: {v}' for k, v in stats.items()]))
+    log.info('\n' + '\n'.join([f'{k}: {v}' for k, v in stats.items()]))
 
 
 if __name__ == "__main__":
-
-
-    
     asyncio.run(main())
