@@ -5,8 +5,10 @@ import os
 import logging
 import time
 from datetime import datetime
+import pickle
 
 import aiohttp
+import redis
 from http2.request import Request
 from http2.response import Response
 from core.stats import Counter
@@ -16,7 +18,6 @@ spiderName = sys.argv[1]
 batchId = sys.argv[2]
 mod = importlib.import_module(f'spiders.{spiderName}')
 spider = mod.Spider()
-done = set()
 
 log = logging.getLogger('Mai')
 log.setLevel(logging.DEBUG)
@@ -40,10 +41,10 @@ log.addHandler(fileHandler)
 log.addHandler(consHandler)
 
 headers = {
-'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/73.0.3683.86 Safari/537.36',
-'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3',
-'Accept-Encoding': 'gzip, deflate',
-'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/73.0.3683.86 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3',
+    'Accept-Encoding': 'gzip, deflate',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 }
 
 
@@ -54,11 +55,11 @@ async def fetch(request, session):
         text = await resp.text()
         return Response(request, text, resp.status)
 
-async def scheduler(request, queue):
-        await queue.put(request)
-        log.debug(f'{request} 已被加入队列，当前队列有 {queue.qsize()} 个URL')
+async def scheduler(request, redisClient, urlQueue):
+        redisClient.rpush(urlQueue, pickle.dumps(request))
+        log.debug(f'{request} 已被加入队列，当前队列有 {redisClient.llen(urlQueue)} 个URL')
 
-async def worker(id, queue, session, counter):
+async def worker(id, urlQueue, urlDone,session, counter):
     '''
         工作方式：
             * 从队列中取出 URL
@@ -67,15 +68,15 @@ async def worker(id, queue, session, counter):
             * 爬虫处理完返回URL或数据
             * 将URL加入队列；将数据交给管道处理
     '''
-    while True:
-        request = await queue.get()
-        if request.fingerprint in done:
+    redisClient = redis.Redis()
+    while redisClient.llen(urlQueue) > 0:
+        request = pickle.loads(redisClient.brpop(urlQueue)[1])
+        if redisClient.sismember(urlDone, request.fingerprint):
             log.info(f'worker#{id} 过滤：{request.url} 已经采集过')
-            queue.task_done() # 从队列获取元素并处理完之后，一定要调用 .task_done() 否则会造成阻塞
+            # queue.task_done() # 从队列获取元素并处理完之后，一定要调用 .task_done() 否则会造成阻塞
             continue
-        done.add(request.fingerprint)
+        redisClient.sadd(urlDone, request.fingerprint)
         log.info(f'worker#{id} 将 {request} 从队列取出')
-        # 等待响应
         try: 
             resp = await fetch(request, session)
         except:
@@ -90,12 +91,11 @@ async def worker(id, queue, session, counter):
             for r in result:
                 if isinstance(r, Request): # 新的URL
                     log.info(f'worker#{id} 将 {r} 加入队列')
-                    await scheduler(r, queue)
+                    await scheduler(r, redisClient, urlQueue)
                 else: # 提取的数据
                     print(f'Item:{r}')
                     counter.inc('items', 1)
             log.info(f'worker#{id} 处理 {request} 完成')
-        queue.task_done()
 
 async def main():
     counter = Counter()
@@ -104,18 +104,23 @@ async def main():
     c = Counter()
 
     # 将URL种子放入队列
-    queue = asyncio.Queue()
-    initSeed = [scheduler(Request(url), queue) for url in spider.urls]
+    # queue = asyncio.Queue()
+    redisClient = redis.Redis()
+    urlQueue = f'{spiderName}-{batchId}' 
+    urlDone = f'{urlQueue}:done'
+    initSeed = [scheduler(Request(url), redisClient, urlQueue) for url in spider.urls]
     await asyncio.gather(*initSeed)
-    log.info(f'qsize = {queue.qsize()}')
+    log.info(f'qsize = {redisClient.llen(urlQueue)}')
 
     # 启动爬虫，默认个数是 5
     workerNum = getattr(spider, 'workerNum', 5)
+    workers = []
     log.info(f'启动 {workerNum} 个worker')
     async with aiohttp.ClientSession() as session:
         for id in range(workerNum):
-            asyncio.create_task(worker(id, queue, session, counter))    
-        await queue.join()    
+            workers.append(asyncio.create_task(worker(id, urlQueue, urlDone, session, counter)))    
+        # 阻塞知道所有URL处理完成
+        await asyncio.gather(*workers)
 
     endtTime = datetime.now()
     stats = {
@@ -126,6 +131,7 @@ async def main():
     stats.update(counter.get_counter())
     sendmail(spiderName, stats, logPath)
     log.info('\n' + '\n'.join([f'{k}: {v}' for k, v in stats.items()]))
+
 
 if __name__ == "__main__":
     asyncio.run(main())

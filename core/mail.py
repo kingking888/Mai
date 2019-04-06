@@ -11,12 +11,14 @@ def sendmail(spiderName, stats, logPath):
     if not FROM or not TO or not passwd:
         logging.warning('邮件发送取消：请设置相关环境变量')
         return          
+    # 构建邮件体
     msg = EmailMessage()
     msg['Subject'] = f'爬虫 - {spiderName} - 采集情况'
     msg['From'] = FROM
     msg['To'] = TO
     # msg['To'] = ', '.join(TO)
     msg.set_content('\n'.join([f'{k}: {v}' for k, v in stats.items()]))
+    # 添加附件
     if os.path.exists(logPath):
         with open(logPath, 'rb') as fp:
             msg.add_attachment(
@@ -25,6 +27,7 @@ def sendmail(spiderName, stats, logPath):
                 subtype='octet-stream',
                 filename=os.path.basename(logPath),
                 ) 
+    # 发送邮件
     with smtplib.SMTP_SSL('smtp.qq.com', 465, timeout=5) as client:
         client.ehlo()
         client.login(FROM, passwd)
